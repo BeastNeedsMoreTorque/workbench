@@ -1,134 +1,182 @@
 package com.lihaoyi.workbench
 
-import akka.actor.{ActorRef, Actor, ActorSystem}
-import akka.util.ByteString
-import com.typesafe.config.ConfigFactory
-import sbt.{Logger, IO}
-import spray.httpx.encoding.Gzip
-import spray.routing.SimpleRoutingApp
-import akka.actor.ActorDSL._
+import java.util.concurrent.atomic.AtomicReference
 
+import akka.actor.{Actor, ActorSystem, Props}
+import akka.http.scaladsl.Http
+import akka.http.scaladsl.coding.{Encoder, Gzip, NoCoding}
+import akka.http.scaladsl.model.HttpMethods._
+import akka.http.scaladsl.model._
+import akka.http.scaladsl.model.headers._
+import akka.http.scaladsl.server.Directives._
+import akka.http.scaladsl.server._
+import akka.http.scaladsl.settings.ServerSettings
+import akka.stream.ActorMaterializer
+import com.typesafe.config.ConfigFactory
+import sbt.IO
 import upickle.Js
 import upickle.default.{Reader, Writer}
-import spray.http.{HttpEntity, AllOrigins, HttpResponse}
-import spray.http.HttpHeaders.`Access-Control-Allow-Origin`
-import concurrent.duration._
-import scala.concurrent.Future
-import scala.io.Source
-import org.scalajs.core.tools.io._
-import org.scalajs.core.tools.logging.Level
-import scala.tools.nsc
-import scala.tools.nsc.Settings
 
-import scala.tools.nsc.backend.JavaPlatform
-import scala.tools.nsc.util.ClassPath.JavaContext
-import scala.collection.mutable
-import scala.tools.nsc.typechecker.Analyzer
-import scala.tools.nsc.util.{JavaClassPath, DirectoryClassPath}
-import spray.http.HttpHeaders._
-import spray.http.HttpMethods._
+import scala.concurrent.{Future, _}
+import scala.concurrent.duration._
+import scala.util.{Failure, Success}
 
-class Server(url: String, port: Int) extends SimpleRoutingApp{
+case class PromiseMessage(p: Promise[Js.Arr])
+
+class WorkbenchActor extends Actor {
+  private var waitingActors = List.empty[PromiseMessage]
+  private var queuedMessages = List.empty[Js.Value]
+  private var numActorsLastRespond = 0
+
+  /**
+    * Flushes returns nothing to any waiting actor every so often,
+    * to prevent the connection from living too long.
+    */
+  case object Clear
+
+  private val system = context.system
+  import system.dispatcher
+
+  system.scheduler.schedule(0.seconds, 10.seconds, self, Clear)
+
+  private def respond(): Unit = {
+    val messages = Js.Arr(queuedMessages: _*)
+    waitingActors.foreach { a =>
+      a.p.success(messages)
+    }
+    numActorsLastRespond = waitingActors.size
+    waitingActors = Nil
+    queuedMessages = Nil
+  }
+
+  override def receive = {
+    case a: PromiseMessage =>
+      // Even if there's someone already waiting,
+      // a new actor waiting replaces the old one
+      waitingActors = a :: waitingActors
+      // comparison to numActorsLastRespond increases the chance to reload all pages in case of multiple clients
+      if (queuedMessages.nonEmpty && numActorsLastRespond > 0 && waitingActors.size >= numActorsLastRespond)
+        respond()
+
+    case msg: Js.Arr =>
+      queuedMessages = msg :: queuedMessages
+      if (waitingActors.nonEmpty) respond()
+
+    case Clear =>
+      respond()
+  }
+}
+
+
+class Server(
+  url: String,
+  port: Int,
+  defaultRootObject: Option[String] = None,
+  rootDirectory: Option[String] = None,
+  useCompression: Boolean = false) {
   val corsHeaders: List[ModeledHeader] =
     List(
       `Access-Control-Allow-Methods`(OPTIONS, GET, POST),
-      `Access-Control-Allow-Origin`(AllOrigins),
+      `Access-Control-Allow-Origin`(HttpOriginRange.*),
       `Access-Control-Allow-Headers`("Origin, X-Requested-With, Content-Type, Accept, Accept-Encoding, Accept-Language, Host, Referer, User-Agent"),
       `Access-Control-Max-Age`(1728000)
     )
+  val cl = getClass.getClassLoader
+
 
   implicit val system = ActorSystem(
     "Workbench-System",
-    config = ConfigFactory.load(ActorSystem.getClass.getClassLoader),
-    classLoader = ActorSystem.getClass.getClassLoader
+    config = ConfigFactory.load(cl),
+    classLoader = cl
   )
 
   /**
-   * The connection from workbench server to the client
-   */
-  object Wire extends autowire.Client[Js.Value, Reader, Writer] with ReadWrite{
+    * The connection from workbench server to the client
+    */
+  object Wire extends autowire.Client[Js.Value, Reader, Writer] with ReadWrite {
     def doCall(req: Request): Future[Js.Value] = {
-      longPoll ! Js.Arr(upickle.default.writeJs(req.path), Js.Obj(req.args.toSeq:_*))
+      longPoll ! Js.Arr(upickle.default.writeJs(req.path), Js.Obj(req.args.toSeq: _*))
       Future.successful(Js.Null)
     }
   }
 
-  /**
-   * Actor meant to handle long polling, buffering messages or waiting actors
-   */
-  private val longPoll = actor(new Actor{
-    var waitingActor: Option[ActorRef] = None
-    var queuedMessages = List[Js.Value]()
-
-    /**
-     * Flushes returns nothing to any waiting actor every so often,
-     * to prevent the connection from living too long.
-     */
-    case object Clear
-    import system.dispatcher
-
-    system.scheduler.schedule(0.seconds, 10.seconds, self, Clear)
-    def respond(a: ActorRef, s: String) = {
-      a ! HttpResponse(
-        entity = s,
-        headers = corsHeaders
-      )
-    }
-    def receive = (x: Any) => (x, waitingActor, queuedMessages) match {
-      case (a: ActorRef, _, Nil) =>
-        // Even if there's someone already waiting,
-        // a new actor waiting replaces the old one
-        waitingActor = Some(a)
-
-      case (a: ActorRef, None, msgs) =>
-        respond(a, upickle.json.write(Js.Arr(msgs:_*)))
-        queuedMessages = Nil
-
-      case (msg: Js.Arr, None, msgs) =>
-        queuedMessages = msg :: msgs
-
-      case (msg: Js.Arr, Some(a), Nil) =>
-        respond(a, upickle.json.write(Js.Arr(msg)))
-        waitingActor = None
-
-      case (Clear, waitingOpt, msgs) =>
-        waitingOpt.foreach(respond(_, upickle.json.write(Js.Arr(msgs :_*))))
-        waitingActor = None
-    }
-  })
 
   /**
-   * Simple spray server:
-   *
-   * - /workbench.js is hardcoded to be the workbench javascript client
-   * - Any other GET request just pulls from the local filesystem
-   * - POSTs to /notifications get routed to the longPoll actor
-   */
-  startServer(url, port) {
-    get {
-      path("workbench.js") {
-        complete {
+    * Actor meant to handle long polling, buffering messages or waiting actors
+    */
+  private val longPoll = system.actorOf(Props[WorkbenchActor], "workbench-actor")
+
+  /**
+    * Simple spray server:
+    *
+    * - /workbench.js is hardcoded to be the workbench javascript client
+    * - Any other GET request just pulls from the local filesystem
+    * - POSTs to /notifications get routed to the longPoll actor
+    */
+
+
+  implicit val materializer = ActorMaterializer()
+  // needed for the future map/flatmap in the end
+  implicit val executionContext = system.dispatcher
+
+  private val serverBinding = new AtomicReference[Http.ServerBinding]()
+  private val encoder: Encoder = if (useCompression) Gzip else NoCoding
+
+  var serverStarted = false
+
+  def startServer(): Unit = {
+    if (serverStarted) return
+    serverStarted = true
+    val bindingFuture = Http().bindAndHandle(
+      handler = routes,
+      interface = url,
+      port = port,
+      settings = ServerSettings(system))
+
+    bindingFuture.onComplete {
+      case Success(binding) ⇒
+        //setting the server binding for possible future uses in the client
+        serverBinding.set(binding)
+        system.log.info(s"Server online at http://${binding.localAddress.getHostName}:${binding.localAddress.getPort}/")
+
+      case Failure(cause) ⇒
+    }
+  }
+
+  lazy val routes: Route =
+    encodeResponseWith(encoder) {
+      get {
+        path("workbench.js") {
           val body = IO.readStream(
             getClass.getClassLoader.getResourceAsStream("client-opt.js")
           )
-          s"""
-          (function(){
-            $body
 
-            com.lihaoyi.workbench.WorkbenchClient().main(${upickle.default.write(url)}, ${upickle.default.write(port)})
-          }).call(this)
-          """
+          complete(
+            s"""
+               |(function(){
+               |  $body
+               |
+               |  WorkbenchClient.main(${upickle.default.write(url)}, ${upickle.default.write(port)})
+               |}).call(this)
+             """.stripMargin)
         }
       } ~
-      getFromDirectory(".")
-
-    } ~
-    post {
-      path("notifications") { ctx =>
-        longPoll ! ctx.responder
-      }
+        pathSingleSlash {
+          getFromFile(defaultRootObject.getOrElse(""))
+        } ~
+        CustomDirectives.getFromBrowseableDirectories(rootDirectory.getOrElse(".")) ~
+        post {
+          path("notifications") {
+            val p = Promise[Js.Arr]
+            longPoll ! PromiseMessage(p)
+            onSuccess(p.future) { v =>
+              complete(HttpResponse(entity = HttpEntity(ContentType(MediaTypes.`application/json`), upickle.json.write(v))).withHeaders(corsHeaders: _*))
+            }
+          }
+        }
     }
-  }
-  def kill() = system.shutdown()
 
+  def kill() = {
+    system.terminate()
+  }
 }

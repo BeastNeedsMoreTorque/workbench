@@ -1,9 +1,9 @@
-workbench 0.3.0
----------------
+Workbench
+---------
 
 ![Example](https://github.com/lihaoyi/scala-js-workbench/blob/master/Example.png?raw=true)
 
-A SBT plugin for [scala-js](https://github.com/lampepfl/scala-js) projects to make development in the browser more pleasant.
+A SBT plugin for [scala-js](https://scala-js.org) projects to make development in the browser more pleasant.
 
 - Spins up a local web server on (by default) `localhost:12345`, whenever you're in the SBT console. Navigate to localhost:12345 in the browser and it'll show a simple page tell you it's alive. You can access any file within your project directory by going to `localhost:12345/path/to/file` in a browser.
 - Forwards all SBT logging from your SBT console to the browser console, so you can see what's going on (e.g. when the project is recompiling) without having to flip back and forth between browser and terminal.
@@ -15,7 +15,10 @@ Installation
 ------------
 - Add to your `project/plugins.sbt`
 ```scala
-addSbtPlugin("com.lihaoyi" % "workbench" % "0.3.0")
+// for sbt 1.0+
+addSbtPlugin("com.lihaoyi" % "workbench" % "0.4.1")
+// for sbt 0.13.x
+addSbtPlugin("com.lihaoyi" % "workbench" % "0.3.1")
 ```
 - Add to your `build.sbt`
 ```scala
@@ -30,6 +33,29 @@ enablePlugins(WorkbenchPlugin)
 
 Once the above installation steps are completed, simply open your desired HTML file via `http://localhost:12345` with the URL path being any file part relative to your project root. e.g. `localhost:12345/target/scala-2.12/classes/index.html`. This should serve up the HTML file and connect it to workbench.
 
+If you want to serve a defaultRootObject on `http://localhost:12345` and serve only files from a root directory you can set this via:
+```scala
+workbenchDefaultRootObject := Some(("build/index-dev.html", "build/"))  // (defaultRootObject, rootDirectory) 
+```
+
+If you're accessing Workbench remotely over a slow network, you can enable compression of the transferred data with:
+```scala
+workbenchCompression := true
+```
+Compression is only supported on sbt 1.0+
+
+#### Server Starting Behaviour
+
+By default, the server starts up when sbt loads. Ie, starting the sbt terminal via `sbt` will start the server as well.
+This behaviour can be changed by adding on of the following settings to your `build.sbt`:
+- start the server on compilation (eg when running `sbt "~fastOptJS"`)
+```scala
+workbenchStartMode := WorkbenchStartModes.OnCompile
+```
+- start the server manually using the `startWorkbenchServer` task
+```scala
+workbenchStartMode := WorkbenchStartModes.Manual
+```
 
 # Live Reloading
 
@@ -93,28 +119,39 @@ Pull requests welcome!
 Change Log
 ----------
 
-##0.3.0
+## 0.4.1
+- Allow host/port configuration
+
+## 0.4.0 (sbt 1.0+ only)
+- Support sbt 1.0+
+
+## 0.3.1 (sbt 0.13.x only)
+- Support for custom `defaultRootObject` and `rootDirectory` (by @torstenrudolf)
+- Custom Server starting behaviour (by @torstenrudolf)
+- Support multiple concurrent clients (by @torstenrudolf)
+
+## 0.3.0
 - Migration to AutoPlugins
 - Removal of `updateBrowsers` feature, made obsolete by increased speed of `fastOptJS`
 - General upgrade of dependencies
 
-##0.2.3
+## 0.2.3
 
 - Upgraded uPickle, removed need for special resolver
 
-##0.2.2
+## 0.2.2
 
 - First implementation of `spliceBrowsers`
 
-##0.2.1
+## 0.2.1
 
 - Added missing resolver `http://dl.bintray.com/non/maven`
 
-##0.2.0
+## 0.2.0
 
 - First implementation of workbench client in Scala.js
 
-##0.1.5
+## 0.1.5
 
 - Properly kill the spray server on plugin unload, `sbt reload` now works 
 - Swap out `play-json` with `upickle`

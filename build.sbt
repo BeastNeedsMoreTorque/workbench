@@ -8,13 +8,13 @@ val defaultSettings = Seq(
 
 lazy val root = project.in(file(".")).settings(defaultSettings:_*).settings(
   name := "workbench",
-  version := "0.3.1-SNAPSHOT",
+  version := "0.4.1",
   organization := "com.lihaoyi",
-  scalaVersion := "2.10.6",
+  scalaVersion := "2.12.4",
   sbtPlugin := true,
   publishArtifact in Test := false,
   publishTo := Some("releases" at "https://oss.sonatype.org/service/local/staging/deploy/maven2"),
-  pomExtra := (
+  pomExtra :=
     <url>https://github.com/lihaoyi/workbench</url>
       <licenses>
         <license>
@@ -33,15 +33,14 @@ lazy val root = project.in(file(".")).settings(defaultSettings:_*).settings(
           <url>https://github.com/lihaoyi</url>
         </developer>
       </developers>
-  ),
+  ,
   (resources in Compile) += {
     (fullOptJS in (client, Compile)).value
     (artifactPath in (client, Compile, fullOptJS)).value
   },
-  addSbtPlugin("org.scala-js" % "sbt-scalajs" % "0.6.13"),
+  addSbtPlugin("org.scala-js" % "sbt-scalajs" % "0.6.21"),
   libraryDependencies ++= Seq(
-    Dependencies.sprayCan,
-    Dependencies.sprayRouting,
+    Dependencies.akkaHttp,
     Dependencies.akka,
     Dependencies.autowire.value,
     Dependencies.upickle.value
